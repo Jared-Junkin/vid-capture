@@ -26,18 +26,32 @@ jobs:
           # Confirm the project format matches what this Xcode can open.
           grep -m2 -E 'archiveVersion|objectVersion' TimestampCam.xcodeproj/project.pbxproj
 
-      - name: Build (unsigned)
+      - name: Build (ad-hoc signed)
         run: |
+          # Ad-hoc sign rather than skipping signing entirely. Sideloadly and
+          # AltStore re-sign by REPLACING an existing signature; a binary built
+          # with CODE_SIGNING_ALLOWED=NO has no LC_CODE_SIGNATURE load command
+          # and no space reserved for one, so the install fails on device with
+          # "Guru Meditation ... Invalid file".
           xcodebuild \
             -project TimestampCam.xcodeproj \
             -scheme TimestampCam \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_ALLOWED=YES \
             build
+
+      - name: Verify the bundle can be re-signed
+        run: |
+          APP=build/Build/Products/Release-iphoneos/TimestampCam.app
+          otool -l "$APP/TimestampCam" | grep -q LC_CODE_SIGNATURE \
+            || { echo "::error::binary has no LC_CODE_SIGNATURE - Sideloadly will reject it"; exit 1; }
+          test -d "$APP/_CodeSignature" \
+            || { echo "::error::no _CodeSignature directory"; exit 1; }
+          codesign -dv "$APP"
 
       - name: Package .ipa
         run: |
