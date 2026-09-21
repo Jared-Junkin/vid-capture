@@ -26,29 +26,30 @@ jobs:
           # Confirm the project format matches what this Xcode can open.
           grep -m2 -E 'archiveVersion|objectVersion' TimestampCam.xcodeproj/project.pbxproj
 
-      - name: Build (ad-hoc signed)
+      - name: Build (unsigned)
         run: |
-          # Ad-hoc sign rather than skipping signing entirely. Sideloadly and
-          # AltStore re-sign by REPLACING an existing signature; a binary built
-          # with CODE_SIGNING_ALLOWED=NO has no LC_CODE_SIGNATURE load command
-          # and no space reserved for one, so the install fails on device with
-          # "Guru Meditation ... Invalid file".
           xcodebuild \
             -project TimestampCam.xcodeproj \
             -scheme TimestampCam \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
-            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Verify the bundle can be re-signed
+      - name: Ad-hoc sign so Sideloadly can re-sign
         run: |
+          # xcodebuild refuses ad-hoc signing against the iOS SDK ("Ad Hoc code
+          # signing is not allowed with SDK 'iOS 17.5'"), but the codesign tool
+          # has no such restriction. Sideloadly re-signs by REPLACING an existing
+          # signature; with none present the binary has no LC_CODE_SIGNATURE and
+          # the device rejects the install as "Guru Meditation ... Invalid file".
           APP=build/Build/Products/Release-iphoneos/TimestampCam.app
+          codesign --force --sign - "$APP"
           otool -l "$APP/TimestampCam" | grep -q LC_CODE_SIGNATURE \
-            || { echo "::error::binary has no LC_CODE_SIGNATURE - Sideloadly will reject it"; exit 1; }
+            || { echo "::error::binary still lacks LC_CODE_SIGNATURE"; exit 1; }
           test -d "$APP/_CodeSignature" \
             || { echo "::error::no _CodeSignature directory"; exit 1; }
           codesign -dv "$APP"
