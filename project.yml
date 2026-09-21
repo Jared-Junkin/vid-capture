@@ -2,6 +2,10 @@ name: TimestampCam
 
 options:
   bundleIdPrefix: com.jaredjunkin
+  # Current XcodeGen defaults to the Xcode 16 project format (objectVersion
+  # 77), which Xcode 15.x on the CI runner cannot open. 56 is the Xcode 14/15
+  # format and is readable by both.
+  objectVersion: 56
   deploymentTarget:
     iOS: "16.0"
   createIntermediateGroups: true

@@ -14,8 +14,17 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Environment
+        run: |
+          xcodegen --version
+          xcodebuild -version
+          ls -d /Applications/Xcode*.app
+
       - name: Generate Xcode project
-        run: xcodegen generate
+        run: |
+          xcodegen generate
+          # Confirm the project format matches what this Xcode can open.
+          grep -m2 -E 'archiveVersion|objectVersion' TimestampCam.xcodeproj/project.pbxproj
 
       - name: Build (unsigned)
         run: |
