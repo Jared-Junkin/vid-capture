@@ -1,0 +1,32 @@
+name: TimestampCam
+
+options:
+  bundleIdPrefix: com.jaredjunkin
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+targets:
+  TimestampCam:
+    type: application
+    platform: iOS
+    sources:
+      - path: TimestampCam
+    info:
+      path: TimestampCam/Info.plist
+      properties:
+        CFBundleDisplayName: TimestampCam
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: Records video with a synchronized timestamp burned into each frame.
+        NSMicrophoneUsageDescription: Records audio alongside the video.
+        NSPhotoLibraryAddUsageDescription: Saves finished recordings to your photo library.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jaredjunkin.timestampcam
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: NO
