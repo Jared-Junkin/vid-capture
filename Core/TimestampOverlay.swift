@@ -1,6 +1,18 @@
-import CoreVideo
 import CoreText
+import CoreVideo
+#if canImport(UIKit)
 import UIKit
+
+private func monospacedFont(size: CGFloat, bold: Bool) -> CTFont {
+    UIFont.monospacedSystemFont(ofSize: size, weight: bold ? .bold : .semibold) as CTFont
+}
+#else
+import AppKit
+
+private func monospacedFont(size: CGFloat, bold: Bool) -> CTFont {
+    NSFont.monospacedSystemFont(ofSize: size, weight: bold ? .bold : .semibold) as CTFont
+}
+#endif
 
 /// Burns `HH:MM:SS:MMM` into the top-right corner of a frame.
 ///
@@ -159,9 +171,11 @@ final class TimestampOverlay {
     // MARK: - One-time rasterisation
 
     private func build(forWidth width: Int, height: Int, degraded: Bool) -> Layout {
-        let pointSize = max(18.0, Double(width) / 26.0)
-        let font = UIFont.monospacedSystemFont(ofSize: pointSize, weight: .bold)
-        let labelFont = UIFont.monospacedSystemFont(ofSize: pointSize * 0.55, weight: .semibold)
+        // Scales with the frame, capped so a wide Retina window capture doesn't
+        // get a label that covers half of it.
+        let pointSize = min(64.0, max(18.0, Double(width) / 26.0))
+        let font = monospacedFont(size: pointSize, bold: true)
+        let labelFont = monospacedFont(size: pointSize * 0.55, bold: false)
 
         let atlas = (0...10).map { index -> Mask in
             rasterise(index == Self.colon ? ":" : String(index), font: font)
@@ -193,10 +207,11 @@ final class TimestampOverlay {
     }
 
     /// Renders text into an 8-bit grey bitmap used as an alpha mask.
-    private func rasterise(_ text: String, font: UIFont) -> Mask {
+    private func rasterise(_ text: String, font: CTFont) -> Mask {
         let attributed = NSAttributedString(string: text,
                                             attributes: [.font: font,
-                                                         .foregroundColor: UIColor.white])
+                                                         NSAttributedString.Key(kCTForegroundColorAttributeName as String):
+                                                             CGColor(gray: 1, alpha: 1)])
         let line = CTLineCreateWithAttributedString(attributed)
 
         var ascent: CGFloat = 0

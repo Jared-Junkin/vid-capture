@@ -36,13 +36,24 @@ final class CaptureController: NSObject, ObservableObject {
     private var costSinceReport = 0.0
 
     private var elapsedTimer: Timer?
+    private var syncTimer: Timer?
     private var recordingStartHost = 0.0
+
+    /// How often to re-measure the anchor while idle and in the foreground.
+    private static let resyncInterval: TimeInterval = 60
+
+    /// Beyond this, the anchor and iOS's own clock can't both be right, and the
+    /// anchor isn't trusted for a clip. They normally agree to tens of ms.
+    private static let maxDisagreement: TimeInterval = 1
 
     // MARK: - Setup
 
     func start() {
         anchor = TimeAnchorStore.load()
         Task { await requestPermissions() }
+        syncTimer = Timer.scheduledTimer(withTimeInterval: Self.resyncInterval, repeats: true) { [weak self] _ in
+            Task { await self?.sync() }
+        }
     }
 
     private func requestPermissions() async {
@@ -113,9 +124,12 @@ final class CaptureController: NSObject, ObservableObject {
 
     // MARK: - Clock sync
 
+    /// Re-measures the anchor. Runs at launch, on returning to the foreground,
+    /// every minute while idle, and on tapping the clock badge -- never during a
+    /// recording, whose anchor is frozen.
     @MainActor
     func sync() async {
-        guard !isSyncing else { return }
+        guard !isSyncing, !isRecording else { return }
         isSyncing = true
         defer { isSyncing = false }
 
@@ -136,9 +150,19 @@ final class CaptureController: NSObject, ObservableObject {
     }
 
     private func startRecording() {
-        // Freeze the anchor now. Whatever iOS does to its own clock during the
-        // clip cannot reach the frames.
-        let active = anchor ?? .fromSystemClock()
+        // Freeze the anchor now, corrected for any sleep since it was measured.
+        // Whatever iOS does to its own clock during the clip cannot reach the
+        // frames.
+        var active = (anchor ?? .fromSystemClock()).correctedForSleep()
+
+        // Independent check against iOS's own clock before stamping a clip.
+        let disagreement = active.disagreementWithSystemClock
+        if abs(disagreement) > Self.maxDisagreement {
+            active = .fromSystemClock()
+            message = String(format: "Synced clock was %.1f s off iOS's clock, so this clip uses iOS time (UNVERIFIED).",
+                             disagreement)
+        }
+
         let offset = TimeZone.current.secondsFromGMT()
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("TimestampCam-\(Int(Date().timeIntervalSince1970)).mov")

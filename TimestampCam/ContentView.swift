@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var camera = CaptureController()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var blinking = false
 
     var body: some View {
@@ -16,6 +17,10 @@ struct ContentView: View {
             }
         }
         .onAppear { camera.start() }
+        // Coming back from the background is when a stale anchor is likeliest.
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { Task { await camera.sync() } }
+        }
     }
 
     // MARK: - Top

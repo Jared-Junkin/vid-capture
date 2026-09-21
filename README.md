@@ -105,14 +105,32 @@ accuracy — that needs an LED reference driven by a GPS-disciplined source.
   unavailable) for predictable timing. This costs exposure in dim scenes; relax
   `lockFrameRate` in `CaptureController.swift` if that matters more.
 
+## Mac window recorder
+
+`timestampcap` records one or more Mac windows with the same burned-in
+timestamp, using the same `Core/` code as the iPhone app: host-clock frame
+times, SNTP anchor frozen per recording, luma-plane overlay.
+
+```
+./build_mac.sh                    # Command Line Tools only, no Xcode
+.build/timestampcap [output-dir]  # pick windows by number, Enter to stop
+```
+
+macOS records windows, not browser tabs: drag each tab you want into its own
+window first. The first run needs Screen Recording permission for your terminal
+app (System Settings > Privacy & Security > Screen Recording), then a restart
+of the terminal.
+
 ## Files
 
 | Path | Role |
 |---|---|
-| `TimestampCam/HostClock.swift` | Monotonic clock and boot identity |
-| `TimestampCam/SNTPClient.swift` | NTP client with min-delay selection |
-| `TimestampCam/TimeAnchor.swift` | The frozen host→UTC mapping, and its store |
-| `TimestampCam/TimestampOverlay.swift` | Glyph atlas and luma-plane burn-in |
+| `Core/HostClock.swift` | Monotonic clock and boot identity (shared) |
+| `Core/SNTPClient.swift` | NTP client with min-delay selection (shared) |
+| `Core/TimeAnchor.swift` | The frozen host→UTC mapping, and its store (shared) |
+| `Core/TimestampOverlay.swift` | Glyph atlas and luma-plane burn-in (shared) |
+| `MacCapture/main.swift` | Mac recorder: clock sync, window picker, status line |
+| `MacCapture/WindowRecorder.swift` | Mac recorder: one window's capture and writer |
 | `TimestampCam/CaptureController.swift` | Session, writer, frame loop |
 | `TimestampCam/ContentView.swift` | Record button, REC badge, clock status |
 | `movtime.py` | Dumps every time field in a `.MOV` |

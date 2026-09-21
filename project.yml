@@ -15,10 +15,13 @@ targets:
     platform: iOS
     sources:
       - path: TimestampCam
+      # Shared with the Mac screen recorder (build_mac.sh).
+      - path: Core
     info:
       path: TimestampCam/Info.plist
       properties:
         CFBundleDisplayName: TimestampCam
+        CFBundleIconName: AppIcon
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -32,4 +35,5 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
