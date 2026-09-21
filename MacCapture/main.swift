@@ -119,6 +119,33 @@ guard !recorders.isEmpty else { exit(1) }
 print("\nRecording \(recorders.count) window(s) to \(outputDirectory.path)")
 print("Press Enter or Ctrl-C to stop.\n")
 
+// Keep the Mac and its display awake: sleep would stop the capture.
+let noSleep = ProcessInfo.processInfo.beginActivity(
+    options: [.idleSystemSleepDisabled, .idleDisplaySleepDisabled], reason: "Recording windows")
+
+// Every 15 minutes, re-measure and ease every window's clock toward it, so drift
+// can't build up over a long recording. Same measurement and host time for all.
+let resyncTimer = DispatchSource.makeTimerSource(queue: .global())
+resyncTimer.schedule(deadline: .now() + ClipClock.resyncInterval, repeating: ClipClock.resyncInterval)
+resyncTimer.setEventHandler {
+    Task {
+        guard let sample = await SNTPClient.measure() else {
+            print("\n  clock resync: no time server reachable, keeping current clock")
+            return
+        }
+        let measured = TimeAnchor.from(sample)
+        TimeAnchorStore.save(measured)
+        let host = HostClock.now()
+        let corrections = recorders.map { $0.correctClock(toward: measured, atHost: host) }
+        if let correction = corrections.compactMap({ $0 }).first {
+            print(String(format: "\n  clock resync: corrected %+.1f ms", correction * 1000))
+        } else {
+            print("\n  clock resync: measurement too noisy, keeping current clock")
+        }
+    }
+}
+resyncTimer.resume()
+
 let startHost = HostClock.now()
 let statusTimer = DispatchSource.makeTimerSource(queue: .global())
 statusTimer.schedule(deadline: .now(), repeating: .milliseconds(100))
@@ -151,6 +178,8 @@ await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>)
     Thread.detachNewThread { _ = readLine(); finish() }
 }
 statusTimer.cancel()
+resyncTimer.cancel()
+ProcessInfo.processInfo.endActivity(noSleep)
 
 print("\n\nStopping...")
 for recorder in recorders {

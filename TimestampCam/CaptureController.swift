@@ -1,11 +1,13 @@
 import AVFoundation
 import Photos
+import UIKit
 
 /// Owns the capture session, the writer, and the frame loop.
 ///
 /// The rule the whole design rests on: nothing on the per-frame path touches
 /// the network or the wall clock. The anchor is measured before recording and
 /// frozen for the clip, so a clock step mid-recording cannot reach the frames.
+/// Long recordings re-measure every 15 minutes, eased in by ClipClock.
 final class CaptureController: NSObject, ObservableObject {
 
     @Published private(set) var isRecording = false
@@ -15,6 +17,8 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var overlayMicroseconds: Double = 0
     @Published private(set) var droppedFrames = 0
     @Published private(set) var message: String?
+    /// The most recent mid-recording clock correction, in seconds.
+    @Published private(set) var lastCorrection: Double?
 
     let session = AVCaptureSession()
 
@@ -29,7 +33,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var audioInput: AVAssetWriterInput?
     private var pendingStart = false
     private var sessionStarted = false
-    private var frozenAnchor = TimeAnchor.fromSystemClock()
+    private var clipClock = ClipClock(anchor: .fromSystemClock())
     private var gmtOffset = 0
     private var outputURL: URL?
     private var framesSinceReport = 0
@@ -37,6 +41,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     private var elapsedTimer: Timer?
     private var syncTimer: Timer?
+    private var recordingSyncTimer: Timer?
     private var recordingStartHost = 0.0
 
     /// How often to re-measure the anchor while idle and in the foreground.
@@ -46,13 +51,39 @@ final class CaptureController: NSObject, ObservableObject {
     /// anchor isn't trusted for a clip. They normally agree to tens of ms.
     private static let maxDisagreement: TimeInterval = 1
 
+    /// Recordings are written in self-contained chunks this long, so if the app
+    /// dies mid-recording only the last chunk is lost, not the whole file.
+    private static let fragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
+
+    private static let filePrefix = "TimestampCam-"
+
     // MARK: - Setup
 
     func start() {
         anchor = TimeAnchorStore.load()
+        recoverUnsavedRecordings()
         Task { await requestPermissions() }
         syncTimer = Timer.scheduledTimer(withTimeInterval: Self.resyncInterval, repeats: true) { [weak self] _ in
             Task { await self?.sync() }
+        }
+
+        // Like the Camera app: leaving the app, locking the phone, or a call
+        // taking the camera ends the recording and saves everything so far.
+        for name in [UIApplication.didEnterBackgroundNotification, .AVCaptureSessionWasInterrupted] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                guard let self, self.isRecording else { return }
+                self.stopRecording()
+            }
+        }
+    }
+
+    /// Saves any recording a crash or forced quit left behind. Because files are
+    /// written in fragments, everything up to the last fragment is playable.
+    private func recoverUnsavedRecordings() {
+        let leftovers = (try? FileManager.default.contentsOfDirectory(
+            at: FileManager.default.temporaryDirectory, includingPropertiesForKeys: nil)) ?? []
+        for url in leftovers where url.lastPathComponent.hasPrefix(Self.filePrefix) && url.pathExtension == "mov" {
+            saveToPhotos(url) {}
         }
     }
 
@@ -125,8 +156,8 @@ final class CaptureController: NSObject, ObservableObject {
     // MARK: - Clock sync
 
     /// Re-measures the anchor. Runs at launch, on returning to the foreground,
-    /// every minute while idle, and on tapping the clock badge -- never during a
-    /// recording, whose anchor is frozen.
+    /// every minute while idle, and on tapping the clock badge. During a
+    /// recording, `correctDuringRecording` takes over instead.
     @MainActor
     func sync() async {
         guard !isSyncing, !isRecording else { return }
@@ -140,6 +171,22 @@ final class CaptureController: NSObject, ObservableObject {
             message = nil
         } else if anchor == nil {
             message = "No time server reachable. Recordings will be marked unverified."
+        }
+    }
+
+    /// Every 15 minutes of recording: re-measure and ease the clip's clock
+    /// toward the new measurement, so drift can't build up over a long game.
+    @MainActor
+    private func correctDuringRecording() async {
+        guard isRecording, let sample = await SNTPClient.measure(), isRecording else { return }
+        let measured = TimeAnchor.from(sample)
+        TimeAnchorStore.save(measured)
+        anchor = measured
+        let host = HostClock.now()
+        captureQueue.async {
+            guard self.writer != nil else { return }
+            let correction = self.clipClock.correct(toward: measured, atHost: host)
+            self.publishAsync { if let correction { self.lastCorrection = correction } }
         }
     }
 
@@ -165,10 +212,10 @@ final class CaptureController: NSObject, ObservableObject {
 
         let offset = TimeZone.current.secondsFromGMT()
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("TimestampCam-\(Int(Date().timeIntervalSince1970)).mov")
+            .appendingPathComponent("\(Self.filePrefix)\(Int(Date().timeIntervalSince1970)).mov")
 
         captureQueue.async {
-            self.frozenAnchor = active
+            self.clipClock = ClipClock(anchor: active)
             self.gmtOffset = offset
             self.outputURL = url
             self.pendingStart = true
@@ -178,7 +225,14 @@ final class CaptureController: NSObject, ObservableObject {
         recordingStartHost = HostClock.now()
         elapsed = 0
         droppedFrames = 0
+        lastCorrection = nil
         isRecording = true
+        // Like the Camera app, keep the screen on: auto-lock would end the clip.
+        UIApplication.shared.isIdleTimerDisabled = true
+        recordingSyncTimer = Timer.scheduledTimer(withTimeInterval: ClipClock.resyncInterval,
+                                                  repeats: true) { [weak self] _ in
+            Task { await self?.correctDuringRecording() }
+        }
         elapsedTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self, self.isRecording else { return }
             self.elapsed = HostClock.now() - self.recordingStartHost
@@ -187,13 +241,22 @@ final class CaptureController: NSObject, ObservableObject {
 
     private func stopRecording() {
         isRecording = false
+        UIApplication.shared.isIdleTimerDisabled = false
         elapsedTimer?.invalidate()
         elapsedTimer = nil
+        recordingSyncTimer?.invalidate()
+        recordingSyncTimer = nil
+
+        // Stopping often happens because the app is leaving the screen; ask iOS
+        // for time to finish the file and hand it to Photos before suspending.
+        let backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Save recording")
+        let done = { UIApplication.shared.endBackgroundTask(backgroundTask) }
 
         captureQueue.async {
             self.pendingStart = false
             guard let writer = self.writer, writer.status == .writing else {
                 self.teardownWriter()
+                done()
                 return
             }
             self.videoInput?.markAsFinished()
@@ -201,11 +264,12 @@ final class CaptureController: NSObject, ObservableObject {
             let url = self.outputURL
             writer.finishWriting {
                 if let url, writer.status == .completed {
-                    self.saveToPhotos(url)
+                    self.saveToPhotos(url, completion: done)
                 } else {
                     self.publishAsync {
                         self.message = writer.error?.localizedDescription ?? "Recording failed."
                     }
+                    done()
                 }
                 self.captureQueue.async { self.teardownWriter() }
             }
@@ -225,6 +289,7 @@ final class CaptureController: NSObject, ObservableObject {
         guard let url = outputURL,
               let writer = try? AVAssetWriter(outputURL: url, fileType: .mov)
         else { return }
+        writer.movieFragmentInterval = Self.fragmentInterval
 
         let video = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -253,19 +318,24 @@ final class CaptureController: NSObject, ObservableObject {
         self.audioInput = audio
     }
 
-    private func saveToPhotos(_ url: URL) {
+    private func saveToPhotos(_ url: URL, completion: @escaping () -> Void) {
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             guard status == .authorized || status == .limited else {
                 self.publishAsync { self.message = "Saved to app storage; photo access denied." }
+                completion()
                 return
             }
+            // Move rather than copy: a copy would need the recording's size in
+            // free space a second time, which for a three-hour game is 15-20 GB.
+            let options = PHAssetResourceCreationOptions()
+            options.shouldMoveFile = true
             PHPhotoLibrary.shared().performChanges {
-                PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: url, options: nil)
+                PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: url, options: options)
             } completionHandler: { success, error in
                 self.publishAsync {
                     self.message = success ? "Saved to Photos" : (error?.localizedDescription ?? "Save failed")
                 }
-                if success { try? FileManager.default.removeItem(at: url) }
+                completion()
             }
         }
     }
@@ -310,14 +380,14 @@ extension CaptureController: AVCaptureVideoDataOutputSampleBufferDelegate,
             sessionStarted = true
         }
 
-        // The only per-frame clock work: one subtraction and one add.
-        let unix = frozenAnchor.unixTime(forHost: CMTimeGetSeconds(presentation))
+        // The only per-frame clock work: a subtraction, an add, and a clamp.
+        let unix = clipClock.unixTime(forHost: CMTimeGetSeconds(presentation))
 
         let before = HostClock.now()
         overlay.draw(into: pixelBuffer,
                      unix: unix,
                      gmtOffset: gmtOffset,
-                     degraded: frozenAnchor.isDegraded)
+                     degraded: clipClock.isDegraded)
         reportCost(seconds: HostClock.now() - before)
 
         if videoInput.isReadyForMoreMediaData {

@@ -34,9 +34,9 @@ TIME = re.compile(r"(\d{2})[:.](\d{2})[:.](\d{2})[:.](\d{3})")
 # Real timing error is tens of ms; a misread second digit is ~1000 ms.
 MISREAD_MS = 150
 
-# A phone reading and a Mac reading this close in burned-in time count as the
-# same instant for the screen-vs-camera comparison. The pairing corrects for the
-# gap between them, so this only bounds how much drift can creep in.
+# A phone frame and a Mac frame whose filmed clock values are this close count
+# as the same moment. The pairing corrects for the gap between them, so this
+# only bounds how much drift can creep in.
 PAIR_WINDOW_MS = 250
 
 # How much of a clip to sample before committing to reading all of it.
@@ -151,34 +151,55 @@ def summarize(rows):
 
 
 def compare(phone_rows, mac_rows):
-    """The three deltas on one timeline: seconds of burned-in time.
+    """The three deltas on one timeline: seconds since the first reading.
 
-    Returns [(label, summary)] for the phone label minus the clock the phone
-    filmed, the Mac label minus the clock the Mac captured, and the clock as the
-    Mac captured it minus the clock as the phone filmed it at the same instant.
+    Returns [(label, summary)] for the phone timestamp minus the clock the phone
+    filmed, the Mac timestamp minus the clock the Mac recorded, and the phone
+    timestamp minus the Mac timestamp at the same moment. The recordings start
+    at different times and run at different frame rates, so "the same moment"
+    is found by matching the msclock.py value each one shows.
     """
+    # Every frame shows the time twice, LOCAL and UTC, and the reader pairs
+    # whichever lines match, so some rows come out in UTC. Local and UTC differ
+    # by whole quarter hours: shift every row onto the same clock as the first
+    # reading. The app's time and the clock's time move together, so no offset
+    # changes -- only where the point sits on the time axis.
+    reference, quarter_hour = (phone_rows + mac_rows)[0][2], 15 * 60 * 1000
+
+    def on_one_clock(rows):
+        shifted = []
+        for frame, seconds, label, clock in rows:
+            shift = round((reference - label) / quarter_hour) * quarter_hour
+            shifted.append((frame, seconds, label + shift, clock + shift))
+        return shifted
+
+    phone_rows, mac_rows = on_one_clock(phone_rows), on_one_clock(mac_rows)
     origin = min(r[2] for r in phone_rows + mac_rows)
 
     def on_timeline(rows):
         return [(frame, (label - origin) / 1000, label, clock) for frame, _, label, clock in rows]
 
-    mac_labels = np.array([r[2] for r in mac_rows])
-    screen_vs_camera = []
-    for frame, _, label, filmed in phone_rows:
-        _, _, mac_label, captured = mac_rows[int(np.argmin(np.abs(mac_labels - label)))]
-        if abs(mac_label - label) <= PAIR_WINDOW_MS:
-            # The clock runs 1:1, so shift the Mac reading to the phone frame's instant.
-            screen_vs_camera.append((frame, (label - origin) / 1000, captured + (label - mac_label), filmed))
+    # For each phone frame, find the Mac frame showing the nearest msclock.py
+    # value, then shift the Mac timestamp by the small remaining clock gap
+    # (both advance 1:1) to get the Mac timestamp for exactly the clock value
+    # the phone saw.
+    mac_clocks = np.array([r[3] for r in mac_rows])
+    phone_vs_mac = []
+    for frame, _, phone_label, phone_clock in phone_rows:
+        _, _, mac_label, mac_clock = mac_rows[int(np.argmin(np.abs(mac_clocks - phone_clock)))]
+        if abs(mac_clock - phone_clock) <= PAIR_WINDOW_MS:
+            mac_label_at_phone_clock = mac_label + (phone_clock - mac_clock)
+            phone_vs_mac.append((frame, (phone_label - origin) / 1000, phone_label, mac_label_at_phone_clock))
 
-    if len(screen_vs_camera) < 3:
-        raise SystemExit(f"Only {len(screen_vs_camera)} phone readings have a Mac reading within "
-                         f"{PAIR_WINDOW_MS} ms. Were the two recordings made at the same time? "
+    if len(phone_vs_mac) < 3:
+        raise SystemExit(f"Only {len(phone_vs_mac)} phone frames show a clock value within {PAIR_WINDOW_MS} ms "
+                         "of one in the Mac recording. Were the two recordings made at the same time? "
                          "(Readings are cached, so re-running is instant.)")
 
     return [
-        ("Phone label − phone-filmed clock", summarize(on_timeline(phone_rows))),
-        ("Mac label − Mac-recorded clock", summarize(on_timeline(mac_rows))),
-        ("Mac-recorded clock − phone-filmed clock", summarize(screen_vs_camera)),
+        ("Phone timestamp − clock the phone filmed", summarize(on_timeline(phone_rows))),
+        ("Mac timestamp − clock the Mac recorded", summarize(on_timeline(mac_rows))),
+        ("Phone timestamp − Mac timestamp, matched on the clock value both show", summarize(phone_vs_mac)),
     ]
 
 
@@ -209,7 +230,7 @@ def plot_offsets(series, title, path):
         ends = np.array([t.min(), t.max()])
         ax.plot(ends, slope * ends + intercept, color=color, linewidth=2, zorder=4)
 
-    ax.set_xlabel("Seconds (burned-in time)", color=ink_secondary)
+    ax.set_xlabel("Seconds since first reading", color=ink_secondary)
     ax.set_ylabel("Delta (ms)", color=ink_secondary)
     ax.grid(axis="y", color=grid, linewidth=0.8, zorder=0)
     ax.tick_params(colors=ink_secondary, length=0)

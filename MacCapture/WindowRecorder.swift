@@ -21,7 +21,6 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     let window: SCWindow
     let outputURL: URL
 
-    private let anchor: TimeAnchor
     private let gmtOffset: Int
     private let queue = DispatchQueue(label: "timestampcap.window")
     private let overlay = TimestampOverlay()
@@ -29,6 +28,7 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var currentStats = Stats()
 
     // Touched only on `queue`.
+    private var clock: ClipClock
     private var stream: SCStream?
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
@@ -36,7 +36,7 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 
     init(window: SCWindow, anchor: TimeAnchor, gmtOffset: Int, outputURL: URL) {
         self.window = window
-        self.anchor = anchor
+        self.clock = ClipClock(anchor: anchor)
         self.gmtOffset = gmtOffset
         self.outputURL = outputURL
     }
@@ -64,6 +64,13 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
         queue.sync { self.stream = stream }
+    }
+
+    /// Eases this recording's clock toward a fresh measurement. Every window
+    /// is given the same measurement and host time, so their timestamps stay
+    /// identical. Returns the correction in seconds, or nil if rejected.
+    func correctClock(toward measured: TimeAnchor, atHost host: Double) -> Double? {
+        queue.sync { clock.correct(toward: measured, atHost: host) }
     }
 
     /// Stops capture and finishes the file. Returns the URL if it was written.
@@ -97,11 +104,11 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         guard let writer, writer.status == .writing, let input else { return }
 
-        // The only per-frame clock work: one subtraction and one add.
-        let unix = anchor.unixTime(forHost: host)
+        // The only per-frame clock work: a subtraction, an add, and a clamp.
+        let unix = clock.unixTime(forHost: host)
 
         let before = HostClock.now()
-        overlay.draw(into: pixels, unix: unix, gmtOffset: gmtOffset, degraded: anchor.isDegraded)
+        overlay.draw(into: pixels, unix: unix, gmtOffset: gmtOffset, degraded: clock.isDegraded)
         let cost = HostClock.now() - before
 
         if input.isReadyForMoreMediaData {
@@ -132,6 +139,9 @@ final class WindowRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             updateStats { $0.error = "could not create \(outputURL.lastPathComponent)" }
             return
         }
+        // Self-contained 10 s chunks: if the process dies, everything up to the
+        // last chunk is still playable.
+        writer.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,

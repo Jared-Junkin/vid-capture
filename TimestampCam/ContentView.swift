@@ -114,6 +114,10 @@ struct ContentView: View {
     private var diagnostics: some View {
         HStack(spacing: 14) {
             Label(String(format: "%.0f us/frame", camera.overlayMicroseconds), systemImage: "timer")
+            if let correction = camera.lastCorrection {
+                Label(String(format: "clock corrected %+.1f ms", correction * 1000),
+                      systemImage: "arrow.triangle.2.circlepath")
+            }
             if camera.droppedFrames > 0 {
                 Label("\(camera.droppedFrames) dropped", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
