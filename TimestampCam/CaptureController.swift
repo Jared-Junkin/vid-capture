@@ -7,7 +7,7 @@ import UIKit
 /// The rule the whole design rests on: nothing on the per-frame path touches
 /// the network or the wall clock. The anchor is measured before recording and
 /// frozen for the clip, so a clock step mid-recording cannot reach the frames.
-/// Long recordings re-measure every 15 minutes, eased in by ClipClock.
+/// Recordings re-measure every minute, eased in by ClipClock.
 final class CaptureController: NSObject, ObservableObject {
 
     @Published private(set) var isRecording = false
@@ -174,7 +174,7 @@ final class CaptureController: NSObject, ObservableObject {
         }
     }
 
-    /// Every 15 minutes of recording: re-measure and ease the clip's clock
+    /// Every minute of recording: re-measure and ease the clip's clock
     /// toward the new measurement, so drift can't build up over a long game.
     @MainActor
     private func correctDuringRecording() async {

@@ -21,6 +21,7 @@ Needs:  pip install -r requirements.txt
 """
 
 import argparse
+import ctypes
 import csv
 import re
 from pathlib import Path
@@ -41,6 +42,9 @@ PAIR_WINDOW_MS = 250
 
 # How much of a clip to sample before committing to reading all of it.
 PROBE_FRAMES, PROBE_EVERY = 300, 10
+
+# Window for the running mean drawn over each series.
+RUNNING_WINDOW_S = 30
 
 
 def timestamps(text):
@@ -104,21 +108,31 @@ def read_offsets(clip, every=1, max_frames=None):
     reader.addOutput_(output)
     reader.startReading()
 
+    # pyobjc doesn't honour the "copy" in copyNextSampleBuffer's name, so it
+    # never releases the frames it returns. Each one then stays alive inside
+    # Apple's video decoder process (VTDecoderXPCService): ~3.4 MB per frame at
+    # 1140x742, which reached 36 GB on a 20-minute clip. Release each frame
+    # explicitly once it's been read, including the ones `every` skips.
+    release = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation").CFRelease
+    release.argtypes = [ctypes.c_void_p]
+
     rows, unreadable, frame = [], 0, -1
     while max_frames is None or frame + 1 < max_frames:
         with objc.autorelease_pool():
             sample = output.copyNextSampleBuffer()
             if sample is None:
                 break
-            frame += 1
-            if frame % every:
-                continue
-            seconds = CoreMedia.CMTimeGetSeconds(CoreMedia.CMSampleBufferGetPresentationTimeStamp(sample))
-            reading = read_frame(CoreMedia.CMSampleBufferGetImageBuffer(sample), Vision)
-            if reading is None:
-                unreadable += 1
-            else:
-                rows.append((frame, seconds, *reading))
+            try:
+                frame += 1
+                if frame % every == 0:
+                    seconds = CoreMedia.CMTimeGetSeconds(CoreMedia.CMSampleBufferGetPresentationTimeStamp(sample))
+                    reading = read_frame(CoreMedia.CMSampleBufferGetImageBuffer(sample), Vision)
+                    if reading is None:
+                        unreadable += 1
+                    else:
+                        rows.append((frame, seconds, *reading))
+            finally:
+                release(objc.pyobjc_id(sample))
         if frame % 100 == 0:
             print(f"  frame {frame}: {len(rows)} read, {unreadable} unreadable")
     return rows, unreadable
@@ -134,6 +148,15 @@ def summarize(rows):
     t_good, off_good = t[good], offset[good]
     slope_per_s, intercept = np.polyfit(t_good, off_good, 1) if good.sum() > 2 else (float("nan"),) * 2
 
+    # Mean of the readings in the trailing window ending at each reading. The
+    # first window's worth is a mean over fewer readings, so it's noisier.
+    order = np.argsort(t_good)
+    t_sorted, off_sorted = t_good[order], off_good[order]
+    sums = np.concatenate([[0.0], np.cumsum(off_sorted)])
+    starts = np.searchsorted(t_sorted, t_sorted - RUNNING_WINDOW_S, side="left")
+    ends = np.arange(1, len(t_sorted) + 1)
+    running_mean = (sums[ends] - sums[starts]) / (ends - starts)
+
     return {
         "t": t,
         "offset": offset,
@@ -147,6 +170,8 @@ def summarize(rows):
         "p95_ms": float(np.percentile(off_good, 95)),
         "drift_ms_per_min": float(slope_per_s * 60),
         "fit": (float(slope_per_s), float(intercept)),
+        "running_t": t_sorted,
+        "running_mean_ms": running_mean,
     }
 
 
@@ -223,15 +248,18 @@ def plot_offsets(series, title, path):
     for (label, s), color in zip(series, colors):
         good = s["good"]
         t, offset = s["t"][good], s["offset"][good]
-        ax.scatter(t, offset, s=9, color=color, linewidths=0, alpha=0.7, zorder=3,
+        ax.scatter(t, offset, s=9, color=color, linewidths=0, alpha=0.35, zorder=3,
                    label=f"{label}:  median {s['median_ms']:.0f} ms, sd {s['std_ms']:.0f} ms, "
                          f"drift {s['drift_ms_per_min']:+.1f} ms/min, n={s['n'] - s['misread']}")
+        ax.plot(s["running_t"], s["running_mean_ms"], color=color, linewidth=2, zorder=5)
         slope, intercept = s["fit"]
         ends = np.array([t.min(), t.max()])
-        ax.plot(ends, slope * ends + intercept, color=color, linewidth=2, zorder=4)
+        ax.plot(ends, slope * ends + intercept, color=color, linewidth=1, linestyle=(0, (4, 3)), zorder=4)
 
     ax.set_xlabel("Seconds since first reading", color=ink_secondary)
     ax.set_ylabel("Delta (ms)", color=ink_secondary)
+    ax.text(0.99, 1.01, f"solid: {RUNNING_WINDOW_S} s running mean   dashed: best-fit line   dots: individual frames",
+            transform=ax.transAxes, ha="right", va="bottom", color=ink_secondary, fontsize=8.5)
     ax.grid(axis="y", color=grid, linewidth=0.8, zorder=0)
     ax.tick_params(colors=ink_secondary, length=0)
     for side in ("top", "right", "left"):

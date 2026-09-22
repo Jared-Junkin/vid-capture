@@ -2,22 +2,22 @@ import Foundation
 
 /// The host-clock-to-UTC mapping for one recording.
 ///
-/// It starts from the anchor frozen at record start. Over a long recording the
-/// device's crystal drifts from true time by a few to ~20 parts per million --
-/// up to ~200 ms over a three-hour game -- so the recording re-measures every
-/// `resyncInterval` and folds each measurement in with `correct(toward:)`. A
-/// correction is eased in over a minute rather than applied at once, so the
+/// It starts from the anchor frozen at record start. A phone's crystal can run
+/// ~30 parts per million off true time -- about 2 ms per minute, measured on a
+/// real 20-minute recording -- so the recording re-measures every minute and
+/// folds each measurement in with `correct(toward:)`. Each correction is eased
+/// in over 10 seconds, fully applied long before the next one, so the
 /// timestamps stay continuous and never jump or run backwards.
 struct ClipClock {
 
     /// How often a recording re-measures its clock.
-    static let resyncInterval: TimeInterval = 15 * 60
+    static let resyncInterval: TimeInterval = 60
     /// How long a correction takes to ease in.
-    static let easeSeconds = 60.0
+    static let easeSeconds = 10.0
     /// Measurements noisier than this aren't worth correcting toward.
     static let maxUncertainty = 0.020
-    /// Drift over one interval is milliseconds; a correction bigger than this
-    /// means the measurement is wrong, not the clock.
+    /// Drift over one interval is a couple of milliseconds; a correction bigger
+    /// than this means the measurement is wrong, not the clock.
     static let maxCorrection = 0.5
 
     let isDegraded: Bool

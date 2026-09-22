@@ -123,7 +123,7 @@ print("Press Enter or Ctrl-C to stop.\n")
 let noSleep = ProcessInfo.processInfo.beginActivity(
     options: [.idleSystemSleepDisabled, .idleDisplaySleepDisabled], reason: "Recording windows")
 
-// Every 15 minutes, re-measure and ease every window's clock toward it, so drift
+// Every minute, re-measure and ease every window's clock toward it, so drift
 // can't build up over a long recording. Same measurement and host time for all.
 let resyncTimer = DispatchSource.makeTimerSource(queue: .global())
 resyncTimer.schedule(deadline: .now() + ClipClock.resyncInterval, repeating: ClipClock.resyncInterval)
